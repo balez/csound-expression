@@ -51,54 +51,53 @@ If signals are created with them they are control-rate signals.
 The Signal space (SigSpace)
 ---------------------------------------
 
-We often want to transform the signal which is wrapped
-in the other type. It can be a monophonic signal.
-If it's just a pure `Sig` then it's not that difficult.
-We can apply a function and get the output. But what
-if the signal is stereo or what if it's wrapped in the `SE`.
-But it has a signal(s) that we want to process. We can use
-different combinations of the function `fmap`. But there is
-a better way.
+Often, we want to apply functions on the signals that are
+contained within a more complex structure. Example of
+structures that occur in practice are tuples of signals, but
+also the side effect monad `SE`, which we have already seen,
+and signals associated with UI-widgets such as knobs and
+sliders, that we will see later-on.
 
-We can use the special type class `SigSpace` :
+We provide an abstraction over such "signal containing"
+types, which we call `SigSpace`. It's a type-class with a
+method for applying a signal function to every signal
+contained within the structure.
 
 ~~~{.haskell}
 class Num a => SigSpace a where
   mapSig :: (Sig -> Sig) -> a -> a
 ~~~
 
-There are lots of instances. For signals, tuples of signals,
-tuples of signals wrapped in the `SE`, the signals that come
-from UI-widgets such as knobs and sliders.
+We also defined a synonym `at` for `mapSig`.
+Of course, `Sig` itself is an instance of `SigSpace` and defines `mapSig` as the identity.
 
-If you are too lazy to write `mapSig` there is a shortcut `at` for you.
-It's the same as `mapSig`. Thats how we can filter a noise. The `linseg`
+The following example illustrates how to filter noise. The `linseg`
 creates a straight line between the points `1500` and `250` that lasts for `5` seconds:
 
 ~~~haskell
 > dac $ at (mlp (linseg [1500, 5, 250]) 0.1) $ white
 ~~~
 
-It let us apply signal transformation functions to values of
-many different types. The one function that we have already seen is `mul`:
+The `SigSpace` type-class lets us apply signal transformations to values of
+many different types. We've already seen such a function, `mul`:
 
 ~~~{.haskell}
 mul :: SigSpace a => Sig -> a -> a
 ~~~
 
-It can scale the signal or many signals.
+`mul` scales the amplitude of all the signals contained in a `SigSpace`.
 
-There is another cool function. It's `cfd`:
+Let us review other useful functions working with `SigSpace`.
 
 ~~~{.haskell}
 cfd :: SigSpace a => Sig -> a -> a -> a
 ~~~
 
-It's a crossfade between two signals. The first signal
-varies in range 0 to 1. It interpolates between second
-and third arguments.
+`cfd` does a crossfade between two signals. The first argument is a signal that should
+vary between 0 to 1. `cfd` then interpolates between second
+and third arguments according to the value of the first argument.
 
-Also we can use bilinear interpolation with four signals
+The same idea is generalised to interpolate between four signals:
 
 ~~~haskell
 cfd4 :: SigSpace a => Sig -> Sig -> a -> a -> a -> a -> a
@@ -118,34 +117,32 @@ three become quiter. The corner to signal map is:
 
 * `(0, 1)` is for `asig4`
 
-The `cfds` can operate on many signals. The first list
-length equals the second one minus one.
 
-~~~{.haskell}
-cfds :: SigSpace a => [Sig] -> [a] -> a
-~~~
-
-Another usefull function is weighted sum
+Signals can be mixed using `wsum`. It takes a list of pairs
+of a weight and `SigSpace` value, and computes the weighted
+sums of the `SigSpace` values.
 
 ~~~{.haskell}
 wsum :: SigSpace a => [(Sig, a)] -> a
 ~~~
 
-It's a weighted sum of signals. Can be useful for mixing
-sounds from several sources.
-
-If we take a closer look at the function `mapSig`:
+`SigSpace` is analogous to the `Functor` class, its method
+`mapSig` being similar to `fmap`.
 
 ~~~haskell
  mapSig :: (Sig -> Sig) -> a -> a
 ~~~
 
-We can notice that it can only transform value with pure functions.
-Pure functions have no side-effects and are deterministic in nature.
-But what if we want to make something random and weird?
-Like filtering the signal with some random function:
+Likewise we define a `BindSig` class analogous to `Monad`
+with a `bindSig` method that allows us to map effectful
+signal functions.
 
-Take for example `jitter`:
+~~~haskell
+class Num a => BindSig a where
+  bindSig :: (Sig -> SE Sig) -> a -> SE a
+~~~
+
+`jitter` is an example of an effectful signal function:
 
 ~~~haskell
 jitter :: Sig -> Sig -> Sig -> SE Sig
@@ -154,42 +151,36 @@ jitter kamp kcpsMin kcpsMax
 
 It creates random line segments with amplitude between `(-kamp, +kamp)`
 with frequency of change in the interval `(kcpsMin, kcpsMax)`.
-It's very useful to introduce some natural changes.
-The output is random so it's wrapped in the `SE`.
 
-Let's filter saw-tooth with it, as a filter we use `blp`,
-which is Butterworth low-pass filter:
+It can be used to introduce random variation in a sound which
+helps make the music sound less artificial.  Random number
+generation is an effectful computation hence, the result of
+`jitter` is wrapped in the `SE` monad.
+
+Let us apply `jitter` to modulate the cutoff frequency of
+a Butterworth low-pass filter `blp`.
 
 ~~~haskell
+> env :: SE Sig
 > env = on 50 1500 $ jitter 1 0.5 2
+
+> filt :: Sig -> SE Sig
 > filt x = at (\cps -> blp cps x) env
 ~~~
 
-So we apply our random `env` to the center frequency of the filter
-and process signal `x` with it.
-
-To apply a function to signal we can use the method `bindSig`
-from the class `BindSig`. It works hust like `SigSpace`
-only it's designed for effectful processing:
-
-~~~haskell
-class Num a => BindSig a where
-  bindSig :: (Sig -> SE Sig) -> a -> SE a
-~~~
-
-Here is the result:
+Using `bindSig` we apply the filter to a signal.
 
 ~~~haskell
 > dac $ bindSig filt $ (saw 220 + sqr 110)
 ~~~
 
-To apply it to the white noise we need more quirky expression:
+To apply our jittery filter some white noise, we use the operator `=<<`.
 
 ~~~haskell
 > dac $ bindSig filt =<< white
 ~~~
 
-The new thing is operator `=<<`, which comes from the `Monad` type class.
+The operator `=<<`, which comes from the `Monad` type class.
 It's standard way to apply effectful transformations to effectful values in the Haskell.
 It's simplified type is:
 
@@ -215,18 +206,18 @@ mapSig (f . g . h) expr
 ~~~
 
 Here dot is Haskell way to compose functions. (we plug input of rightmost to the input of next and so on).
-But now we change the `f` to `ef` which has side effects. And then we need to
-change `mapSig` to `bindSig` and moreover if `expr` changes to effectful `expr`
+But now we change the `f` to `f'` which has side effects. And then we need to
+change `mapSig` to `bindSig` and moreover if `expr` changes to effectful `expr'`
 we need to add `=<<` in proper place.
 
 ~~~haskell
-bindSig (eff . g . h) =<< expr'
+bindSig (e' . g . h) =<< expr'
 ~~~
 
 This can be quite annoying when we want to quickly test some effects on input signals.
-To solve this we can use the very generic function `at`.
+To solve this we can use the generic function `at`.
 It calculates by the types of inputs the right conversion for it.
-So it can be used inplace of `mapSig`, `bindSig` and many others.
+So it can be used instead of `mapSig`, `bindSig` and many others.
 It's kind of swiss army knife to apply any signal processing function to anything.
 
 The type is very generic. We use some clever hackery to make things right.
@@ -235,7 +226,7 @@ The type is very generic. We use some clever hackery to make things right.
 at :: At a b c => (a -> b) -> c -> AtOut a b c
 ~~~
 
-Just use it! It's convenient. Let's look at examples:
+Just use it! It's convenient. Let's look at some examples:
 
 In place of `mapSig`:
 
@@ -269,7 +260,7 @@ SigSpace for stereo transformations
 ----------------------------------
 
 There are special variants of `SigSpace` and `BindSpace`
-which are useful for stereo-effects. The process inputs with stereo transformations:
+which are useful for stereo-effects. They process inputs with stereo transformations:
 
 ~~~haskell
 class SigSpace2 a where
